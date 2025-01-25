@@ -6,6 +6,7 @@ const { Server } = require("socket.io");
 const cors = require("cors");
 
 const app = express();
+const PORT = process.env.PORT || 8000;
 
 const allowedOrigins = ["http://localhost:3000", process.env.URL];
 app.use(
@@ -102,6 +103,6 @@ io.on("connection", (socket) => {
   });
 });
 
-httpServer.listen(process.env.PORT || 8000, () => {
-  console.log(`Listining on ${process.env.PORT ? process.env.PORT : "8000"}`);
+httpServer.listen(PORT, () => {
+  console.log(`Server is running on port ${PORT}`);
 });
