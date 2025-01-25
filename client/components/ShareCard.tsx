@@ -47,203 +47,234 @@ const ShareCard = () => {
   const workerRef = useRef<Worker>();
 
   const addUserToSocketDB = () => {
-    // console.log("add user");
-    userDetails.socket.on("connect", () => {
-      // console.log(userDetails.socket.id, userDetails.userId);
+    if (!userDetails.socket) {
+      console.log("Socket not initialized");
+      return;
+    }
+
+    // Only set up the connection if we're not already connected
+    if (userDetails.connectionStatus === 'ready') {
+      setuserId(userDetails.userId);
+      return;
+    }
+
+    console.log("Setting up socket connection");
+    
+    // Wait for socket to be ready
+    if (userDetails.socket.connected) {
       setuserId(userDetails.userId);
       userDetails.socket.emit("details", {
         socketId: userDetails.socket.id,
         uniqueId: userDetails.userId,
       });
-    });
+    }
   };
 
-  function CopyToClipboard(value: any) {
-    setisCopied(true);
-    toast.success("Copied");
-    navigator.clipboard.writeText(value);
-    setTimeout(() => {
-      setisCopied(false);
-    }, 3000);
-  }
-
   useEffect(() => {
-    // @ts-ignore test
-    workerRef.current = new Worker(
-      new URL("../utils/worker.ts", import.meta.url)
-    );
+    // Initialize web worker
+    try {
+      // @ts-ignore test
+      workerRef.current = new Worker(
+        new URL("../utils/worker.ts", import.meta.url)
+      );
+    } catch (error) {
+      console.error("Failed to initialize web worker:", error);
+    }
 
-    addUserToSocketDB();
+    // Set up socket connection
+    if (userDetails.socket) {
+      addUserToSocketDB();
+    }
 
+    // Set partner ID from URL if present
     if (searchParams.get("code")) {
       setpartnerId(String(searchParams.get("code")));
     }
 
-    userDetails.socket.on("signaling", (data: any) => {
-      // console.log(data);
-      setacceptCaller(true);
-      setsignalingData(data);
-      setpartnerId(data.from);
-    });
+    // Handle signaling
+    if (userDetails.socket) {
+      userDetails.socket.on("signaling", (data: any) => {
+        console.log("Received signaling data:", data);
+        setacceptCaller(true);
+        setsignalingData(data);
+        setpartnerId(data.from);
+      });
+    }
 
+    // Set up web worker event listener
     workerRef.current?.addEventListener("message", (event: any) => {
       if (event.data?.progress) {
-        // console.log(event.data.progress);
         setfileDownloadProgress(Number(event.data.progress));
       } else if (event.data?.blob) {
         setdownloadFile(event.data?.blob);
-        // Reset progress on the receiver's side
         setfileDownloadProgress(0);
         setfileReceiving(false);
-        // console.log(event.data?.blob);
-        // console.log(event.data?.timeTaken);
-        // console.log(fileNameState);
       }
     });
-    console.log(userDetails.socket);
 
     return () => {
-      peerRef.current?.destroy();
       if (peerRef.current) {
+        peerRef.current.destroy();
         setacceptCaller(false);
-        setacceptCaller(false);
-        userDetails.socket.off();
+        setcurrentConnection(false);
+      }
+      if (userDetails.socket) {
+        userDetails.socket.off("signaling");
       }
       workerRef.current?.terminate();
     };
-  }, []);
+  }, [userDetails.socket, userDetails.userId]);
 
   const callUser = () => {
+    if (!partnerId) {
+      toast.error("Please enter partner ID");
+      return;
+    }
+
+    setisLoading(true);
+
     const peer = new Peer({
       initiator: true,
       trickle: false,
       config: {
         iceServers: [
           {
+            urls: [
+              "stun:stun.l.google.com:19302",
+              "stun:stun1.l.google.com:19302",
+              "stun:stun2.l.google.com:19302"
+            ]
+          },
+          {
             urls: "turn:openrelay.metered.ca:80",
             username: "openrelayproject",
             credential: "openrelayproject",
           },
           {
-            urls: "turn:numb.viagenie.ca",
-            credential: "muazkh",
-            username: "webrtc@live.com",
-          },
+            urls: "turn:openrelay.metered.ca:443",
+            username: "openrelayproject",
+            credential: "openrelayproject",
+          }
         ],
       },
     });
+
     peerRef.current = peer;
 
-    //send the signal via socket
     peer.on("signal", (data) => {
-      userDetails.socket.emit("send-signal", {
+      console.log("Sending signal to:", partnerId);
+      userDetails.socket?.emit("send-signal", {
         from: userDetails.userId,
         signalData: data,
         to: partnerId,
       });
     });
 
-    peer.on("data", (data) => {
-      // console.log(data);
-
-      // Parse received data
-      const parsedData = JSON.parse(data);
-
-      if (parsedData.chunk) {
-        setfileReceiving(true);
-        // Handle the received chunk
-        handleReceivingData(parsedData.chunk);
-      } else if (parsedData.done) {
-        // Handle the end of the file transfer
-        handleReceivingData(parsedData);
-        toast.success("File received successfully");
-      } else if (parsedData.info) {
-        handleReceivingData(parsedData);
-      }
-    });
-
-    //receive accept signal via socket
-    userDetails.socket.on("callAccepted", (data: any) => {
-      peer.signal(data.signalData);
+    peer.on("connect", () => {
+      console.log("Peer connection established");
       setisLoading(false);
       setcurrentConnection(true);
       setterminateCall(true);
-      toast.success(`Successful connection with ${partnerId}`);
+      toast.success(`Connected to ${partnerId}`);
       userDetails.setpeerState(peer);
     });
 
-    peer.on("close", () => {
-      // console.log(`${partnerId} disconnected`);
-      // Handle the disconnection, e.g., remove UI elements, update state, etc.
-      setpartnerId("");
-      setcurrentConnection(false);
-      toast.error(`${partnerId} disconnected`);
-      setfileUpload(false);
-      setterminateCall(false);
-      setpartnerId("");
-      userDetails.setpeerState(undefined);
+    peer.on("data", handlePeerData);
+
+    userDetails.socket?.on("callAccepted", (data: any) => {
+      console.log("Call accepted, processing signal");
+      peer.signal(data.signalData);
     });
 
-    peer.on("error", (err) => {
-      console.log(err);
-    });
+    peer.on("close", handlePeerClose);
+    peer.on("error", handlePeerError);
   };
 
   const acceptUser = () => {
     const peer = new Peer({
       initiator: false,
       trickle: false,
+      config: {
+        iceServers: [
+          {
+            urls: [
+              "stun:stun.l.google.com:19302",
+              "stun:stun1.l.google.com:19302",
+              "stun:stun2.l.google.com:19302"
+            ]
+          },
+          {
+            urls: "turn:openrelay.metered.ca:80",
+            username: "openrelayproject",
+            credential: "openrelayproject",
+          },
+          {
+            urls: "turn:openrelay.metered.ca:443",
+            username: "openrelayproject",
+            credential: "openrelayproject",
+          }
+        ],
+      },
     });
 
     peerRef.current = peer;
     userDetails.setpeerState(peer);
-    //send the signal to caller
+
     peer.on("signal", (data) => {
-      userDetails.socket.emit("accept-signal", {
+      console.log("Sending accept signal");
+      userDetails.socket?.emit("acceptCall", {
         signalData: data,
+        from: userDetails.userId,
         to: partnerId,
       });
-      setcurrentConnection(true);
-      setacceptCaller(false);
-      setterminateCall(true);
-      toast.success(`Successful connection with ${partnerId}`);
     });
 
-    peer.on("data", (data) => {
-      // Parse received data
-      const parsedData = JSON.parse(data);
+    peer.on("connect", () => {
+      console.log("Peer connection established");
+      setcurrentConnection(true);
+      setterminateCall(true);
+      toast.success(`Connected to ${partnerId}`);
+    });
 
+    peer.on("data", handlePeerData);
+    peer.on("close", handlePeerClose);
+    peer.on("error", handlePeerError);
+
+    console.log("Processing received signal");
+    peer.signal(signalingData.signalData);
+  };
+
+  const handlePeerData = (data: any) => {
+    try {
+      const parsedData = JSON.parse(data);
       if (parsedData.chunk) {
         setfileReceiving(true);
-        // Handle the received chunk
         handleReceivingData(parsedData.chunk);
       } else if (parsedData.done) {
-        // Handle the end of the file transfer
         handleReceivingData(parsedData);
         toast.success("File received successfully");
       } else if (parsedData.info) {
         handleReceivingData(parsedData);
       }
-    });
+    } catch (error) {
+      console.error("Error processing peer data:", error);
+    }
+  };
 
-    //verify the signal of the caller
-    peer.signal(signalingData.signalData);
+  const handlePeerClose = () => {
+    console.log(`Peer ${partnerId} disconnected`);
+    setpartnerId("");
+    setcurrentConnection(false);
+    toast.error(`${partnerId} disconnected`);
+    setfileUpload(false);
+    setterminateCall(false);
+    userDetails.setpeerState(undefined);
+  };
 
-    peer.on("close", () => {
-      // console.log(`${partnerId} disconnected`);
-      // Handle the disconnection, e.g., remove UI elements, update state, etc.
-      setpartnerId("");
-      setcurrentConnection(false);
-      toast.error(`${partnerId} disconnected`);
-      setfileUpload(false);
-      setterminateCall(false);
-      setpartnerId("");
-      userDetails.setpeerState(undefined);
-    });
-
-    peer.on("error", (err) => {
-      console.log(err);
-    });
+  const handlePeerError = (err: Error) => {
+    console.error("Peer connection error:", err);
+    toast.error("Connection error occurred");
+    setisLoading(false);
   };
 
   const handleConnectionMaking = () => {
@@ -262,7 +293,6 @@ const ShareCard = () => {
 
   const handleFileChange = (e: any) => {
     setfileUpload(e.target.files);
-    // console.log(fileUpload);
   };
 
   function handleReceivingData(data: any) {
@@ -273,14 +303,11 @@ const ShareCard = () => {
       });
       setfileNameState(data.fileName);
       setname(data.fileName);
-      // console.log(data.fileName);
     } else if (data.done) {
       const parsed = data;
-      // setfileNameState(parsed.fileName);
       const fileSize = parsed.fileSize;
       workerRef.current?.postMessage("download");
     } else {
-      setdownloadFile("sjdf");
       workerRef.current?.postMessage(data);
     }
   }
@@ -293,8 +320,6 @@ const ShareCard = () => {
 
     const readAndSendChunk = () => {
       const chunk = file.slice(offset, offset + chunkSize);
-      // console.log(offset, chunkSize + offset);
-
       const reader = new FileReader();
 
       if (offset == 0) {
@@ -313,21 +338,18 @@ const ShareCard = () => {
           const chunkData: any = event.target.result;
           const uint8ArrayChunk = new Uint8Array(chunkData);
 
-          // Send the chunk data along with the progress information
           const progressPayload = {
             chunk: Array.from(uint8ArrayChunk),
             progress: (offset / file.size) * 100,
           };
-          // console.log(progressPayload);
           peer.write(JSON.stringify(progressPayload));
           setfileUploadProgress((offset / file.size) * 100);
 
           offset += chunkSize;
 
           if (offset < file.size) {
-            readAndSendChunk(); // Continue reading and sending chunks
+            readAndSendChunk(); 
           } else {
-            // Signal the end of the file transfer
             peer.write(
               JSON.stringify({
                 done: true,
@@ -343,7 +365,6 @@ const ShareCard = () => {
         }
       };
 
-      // If the chunk size is greater than the remaining file size, read the entire remaining file
       reader.readAsArrayBuffer(chunk);
     };
 
