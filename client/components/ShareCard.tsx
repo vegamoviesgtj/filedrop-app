@@ -1,6 +1,5 @@
 "use client";
 import React, { useEffect, useRef, useState } from "react";
-
 import {
   Card,
   CardContent,
@@ -42,63 +41,63 @@ const ShareCard = () => {
   const [fileReceiving, setfileReceiving] = useState(false);
   const [name, setname] = useState<any>();
   const searchParams = useSearchParams();
-
-  // used web worker for expensive work
   const workerRef = useRef<Worker>();
 
-  const addUserToSocketDB = () => {
-    if (!userDetails.socket) {
-      console.log("Socket not initialized");
-      return;
-    }
-
-    // Only set up the connection if we're not already connected
-    if (userDetails.connectionStatus === 'ready') {
-      setuserId(userDetails.userId);
-      return;
-    }
-
-    console.log("Setting up socket connection");
-    
-    // Wait for socket to be ready
-    if (userDetails.socket.connected) {
-      setuserId(userDetails.userId);
-      userDetails.socket.emit("details", {
-        socketId: userDetails.socket.id,
-        uniqueId: userDetails.userId,
-      });
-    }
-  };
+  function CopyToClipboard(value: any) {
+    setisCopied(true);
+    toast.success("Copied");
+    navigator.clipboard.writeText(value);
+    setTimeout(() => {
+      setisCopied(false);
+    }, 3000);
+  }
 
   useEffect(() => {
     // Initialize web worker
     try {
-      // @ts-ignore test
       workerRef.current = new Worker(
         new URL("../utils/worker.ts", import.meta.url)
       );
     } catch (error) {
       console.error("Failed to initialize web worker:", error);
+      toast.error("Failed to initialize file transfer system");
     }
 
     // Set up socket connection
-    if (userDetails.socket) {
-      addUserToSocketDB();
+    if (userDetails.socket && userDetails.userId) {
+      console.log("Setting up socket connection");
+      setuserId(userDetails.userId);
+      
+      if (userDetails.socket.connected) {
+        userDetails.socket.emit("details", {
+          socketId: userDetails.socket.id,
+          uniqueId: userDetails.userId,
+        });
+      }
+
+      // Handle signaling
+      userDetails.socket.on("signaling", (data: any) => {
+        console.log("Received signaling data:", data);
+        if (data && data.from) {
+          setacceptCaller(true);
+          setsignalingData(data);
+          setpartnerId(data.from);
+        }
+      });
+
+      // Handle call accepted
+      userDetails.socket.on("callAccepted", (data: any) => {
+        console.log("Call accepted:", data);
+        if (peerRef.current && data.signalData) {
+          peerRef.current.signal(data.signalData);
+        }
+      });
     }
 
     // Set partner ID from URL if present
-    if (searchParams.get("code")) {
-      setpartnerId(String(searchParams.get("code")));
-    }
-
-    // Handle signaling
-    if (userDetails.socket) {
-      userDetails.socket.on("signaling", (data: any) => {
-        console.log("Received signaling data:", data);
-        setacceptCaller(true);
-        setsignalingData(data);
-        setpartnerId(data.from);
-      });
+    const codeParam = searchParams.get("code");
+    if (codeParam) {
+      setpartnerId(codeParam);
     }
 
     // Set up web worker event listener
@@ -109,32 +108,40 @@ const ShareCard = () => {
         setdownloadFile(event.data?.blob);
         setfileDownloadProgress(0);
         setfileReceiving(false);
+        toast.success("File download complete");
       }
     });
 
     return () => {
-      if (peerRef.current) {
-        peerRef.current.destroy();
-        setacceptCaller(false);
-        setcurrentConnection(false);
-      }
-      if (userDetails.socket) {
-        userDetails.socket.off("signaling");
-      }
+      cleanupPeerConnection();
+      cleanupSocketConnection();
       workerRef.current?.terminate();
     };
   }, [userDetails.socket, userDetails.userId]);
 
-  const callUser = () => {
-    if (!partnerId) {
-      toast.error("Please enter partner ID");
-      return;
+  const cleanupPeerConnection = () => {
+    if (peerRef.current) {
+      try {
+        peerRef.current.destroy();
+      } catch (error) {
+        console.error("Error destroying peer connection:", error);
+      }
+      setacceptCaller(false);
+      setcurrentConnection(false);
+      setterminateCall(false);
     }
+  };
 
-    setisLoading(true);
+  const cleanupSocketConnection = () => {
+    if (userDetails.socket) {
+      userDetails.socket.off("signaling");
+      userDetails.socket.off("callAccepted");
+    }
+  };
 
+  const initializePeer = (isInitiator: boolean) => {
     const peer = new Peer({
-      initiator: true,
+      initiator: isInitiator,
       trickle: false,
       config: {
         iceServers: [
@@ -142,8 +149,8 @@ const ShareCard = () => {
             urls: [
               "stun:stun.l.google.com:19302",
               "stun:stun1.l.google.com:19302",
-              "stun:stun2.l.google.com:19302"
-            ]
+              "stun:stun2.l.google.com:19302",
+            ],
           },
           {
             urls: "turn:openrelay.metered.ca:80",
@@ -154,11 +161,39 @@ const ShareCard = () => {
             urls: "turn:openrelay.metered.ca:443",
             username: "openrelayproject",
             credential: "openrelayproject",
-          }
+          },
         ],
       },
     });
 
+    peer.on("error", (err) => {
+      console.error("Peer connection error:", err);
+      toast.error("Connection error occurred");
+      setisLoading(false);
+      cleanupPeerConnection();
+    });
+
+    peer.on("close", () => {
+      console.log("Peer connection closed");
+      handlePeerClose();
+    });
+
+    return peer;
+  };
+
+  const callUser = () => {
+    if (!partnerId) {
+      toast.error("Please enter partner ID");
+      return;
+    }
+
+    if (!userDetails.socket?.connected) {
+      toast.error("Not connected to server");
+      return;
+    }
+
+    setisLoading(true);
+    const peer = initializePeer(true);
     peerRef.current = peer;
 
     peer.on("signal", (data) => {
@@ -180,43 +215,20 @@ const ShareCard = () => {
     });
 
     peer.on("data", handlePeerData);
-
-    userDetails.socket?.on("callAccepted", (data: any) => {
-      console.log("Call accepted, processing signal");
-      peer.signal(data.signalData);
-    });
-
-    peer.on("close", handlePeerClose);
-    peer.on("error", handlePeerError);
   };
 
   const acceptUser = () => {
-    const peer = new Peer({
-      initiator: false,
-      trickle: false,
-      config: {
-        iceServers: [
-          {
-            urls: [
-              "stun:stun.l.google.com:19302",
-              "stun:stun1.l.google.com:19302",
-              "stun:stun2.l.google.com:19302"
-            ]
-          },
-          {
-            urls: "turn:openrelay.metered.ca:80",
-            username: "openrelayproject",
-            credential: "openrelayproject",
-          },
-          {
-            urls: "turn:openrelay.metered.ca:443",
-            username: "openrelayproject",
-            credential: "openrelayproject",
-          }
-        ],
-      },
-    });
+    if (!userDetails.socket?.connected) {
+      toast.error("Not connected to server");
+      return;
+    }
 
+    if (!signalingData?.signalData) {
+      toast.error("Invalid connection data");
+      return;
+    }
+
+    const peer = initializePeer(false);
     peerRef.current = peer;
     userDetails.setpeerState(peer);
 
@@ -233,13 +245,11 @@ const ShareCard = () => {
       console.log("Peer connection established");
       setcurrentConnection(true);
       setterminateCall(true);
+      setacceptCaller(false);
       toast.success(`Connected to ${partnerId}`);
     });
 
     peer.on("data", handlePeerData);
-    peer.on("close", handlePeerClose);
-    peer.on("error", handlePeerError);
-
     console.log("Processing received signal");
     peer.signal(signalingData.signalData);
   };
@@ -247,6 +257,7 @@ const ShareCard = () => {
   const handlePeerData = (data: any) => {
     try {
       const parsedData = JSON.parse(data);
+      
       if (parsedData.chunk) {
         setfileReceiving(true);
         handleReceivingData(parsedData.chunk);
@@ -255,9 +266,12 @@ const ShareCard = () => {
         toast.success("File received successfully");
       } else if (parsedData.info) {
         handleReceivingData(parsedData);
+        setfileNameState(parsedData.fileName);
+        setname(parsedData.fileName);
       }
     } catch (error) {
       console.error("Error processing peer data:", error);
+      toast.error("Error processing received data");
     }
   };
 
@@ -266,103 +280,107 @@ const ShareCard = () => {
     setpartnerId("");
     setcurrentConnection(false);
     toast.error(`${partnerId} disconnected`);
-    setfileUpload(false);
+    setfileUpload(null);
     setterminateCall(false);
     userDetails.setpeerState(undefined);
   };
 
-  const handlePeerError = (err: Error) => {
-    console.error("Peer connection error:", err);
-    toast.error("Connection error occurred");
-    setisLoading(false);
-  };
-
   const handleConnectionMaking = () => {
-    setisLoading(true);
-    if (partnerId && partnerId.length == 10) {
-      callUser();
-    } else {
-      setisLoading(false);
-      toast.error("Enter correct Peer's Id");
+    if (partnerId.trim() === "") {
+      toast.error("Please enter partner ID");
+      return;
     }
-  };
-
-  const handleFileUploadBtn = () => {
-    fileInputRef.current.click();
+    setisLoading(true);
+    callUser();
   };
 
   const handleFileChange = (e: any) => {
-    setfileUpload(e.target.files);
+    const files = e.target.files;
+    if (files && files.length > 0) {
+      setfileUpload(files);
+    }
   };
 
-  function handleReceivingData(data: any) {
+  const handleReceivingData = (data: any) => {
     if (data.info) {
       workerRef.current?.postMessage({
-        status: "fileInfo",
+        type: "initialize",
+        fileName: data.fileName,
         fileSize: data.fileSize,
       });
       setfileNameState(data.fileName);
       setname(data.fileName);
     } else if (data.done) {
-      const parsed = data;
-      const fileSize = parsed.fileSize;
       workerRef.current?.postMessage("download");
     } else {
       workerRef.current?.postMessage(data);
     }
-  }
+  };
 
-  const handleWebRTCUpload = () => {
-    const peer = peerRef.current;
+  const handleWebRTCUpload = (peer: any) => {
+    if (!fileUpload || !fileUpload[0]) {
+      toast.error("Please select a file first");
+      return;
+    }
+
     const file = fileUpload[0];
-    const chunkSize = 16 * 1024; // 16 KB chunks (you can adjust this size)
+    const chunkSize = 16384; // 16KB chunks
     let offset = 0;
+    setfileSending(true);
+
+    // Send file info first
+    peer.write(
+      JSON.stringify({
+        info: true,
+        fileName: file.name,
+        fileSize: file.size,
+      })
+    );
 
     const readAndSendChunk = () => {
-      const chunk = file.slice(offset, offset + chunkSize);
+      const chunk = file.slice(offset, Math.min(offset + chunkSize, file.size));
       const reader = new FileReader();
 
-      if (offset == 0) {
-        setfileSending(true);
-        const fileInfo = {
-          info: true,
-          fileName: file.name,
-          fileSize: file.size,
-          fileType: file.type,
-        };
-        peer.write(JSON.stringify(fileInfo));
-      }
-
-      reader.onload = (event) => {
-        if (event.target?.result) {
-          const chunkData: any = event.target.result;
+      reader.onload = (event: any) => {
+        try {
+          const chunkData = event.target.result;
           const uint8ArrayChunk = new Uint8Array(chunkData);
 
           const progressPayload = {
             chunk: Array.from(uint8ArrayChunk),
             progress: (offset / file.size) * 100,
           };
+
           peer.write(JSON.stringify(progressPayload));
           setfileUploadProgress((offset / file.size) * 100);
 
-          offset += chunkSize;
+          offset += chunk.size;
 
           if (offset < file.size) {
-            readAndSendChunk(); 
+            readAndSendChunk();
           } else {
             peer.write(
               JSON.stringify({
                 done: true,
                 fileName: file.name,
                 fileSize: file.size,
-                fileType: file.type,
               })
             );
-            setfileUploadProgress(100);
             setfileSending(false);
-            toast.success("Sended file successfully");
+            setfileUploadProgress(0);
+            toast.success("File sent successfully");
           }
+        } catch (error) {
+          console.error("Error sending chunk:", error);
+          toast.error("Error sending file");
+          setfileSending(false);
         }
+      };
+
+      reader.onerror = () => {
+        console.error("Error reading file chunk");
+        toast.error("Error reading file");
+        setfileSending(false);
       };
 
       reader.readAsArrayBuffer(chunk);
@@ -372,143 +390,99 @@ const ShareCard = () => {
   };
 
   return (
-    <>
-      <Card className="sm:max-w-[450px] max-w-[95%]">
-        {/* <CardHeader></CardHeader> */}
-        <CardContent className="mt-8">
-          <form>
-            <div className="grid w-full items-center gap-4">
-              <div className="flex flex-col gap-y-1">
-                <Label htmlFor="name">My ID</Label>
-                <div className="flex flex-row justify-left items-center space-x-2">
-                  <div className="flex border rounded-md px-3 py-2 text-sm h-10 w-full bg-muted">
-                    {userId ? userId : "Loading..."}
-                  </div>
-                  <Button
-                    variant="outline"
-                    type="button"
-                    className="p-4"
-                    onClick={() => CopyToClipboard(userDetails?.userId)}
-                    disabled={userId ? false : true}
-                  >
-                    {isCopied ? (
-                      <Check size={15} color="green" />
-                    ) : (
-                      <CopyIcon size={15} />
-                    )}
-                  </Button>
-                  <ShareLink userCode={userId} />
-                </div>
-              </div>
-
-              <div className="flex flex-col gap-y-1">
-                <Label htmlFor="name">Peer`s ID</Label>
-                <div className="flex flex-row justify-left items-center space-x-2">
-                  <Input
-                    id="name"
-                    placeholder="ID"
-                    onChange={(e) => setpartnerId(e.target.value)}
-                    disabled={terminateCall}
-                    value={partnerId}
-                  />
-                  <Button
-                    variant="outline"
-                    type="button"
-                    className="flex items-center justify-center p-4 w-[160px]"
-                    onClick={handleConnectionMaking}
-                    disabled={terminateCall}
-                  >
-                    {isLoading ? (
-                      <>
-                        <div className="scale-0 hidden dark:flex dark:scale-100">
-                          <TailSpin color="white" height={18} width={18} />
-                        </div>
-                        <div className="scale-100 flex dark:scale-0 dark:hidden">
-                          <TailSpin color="black" height={18} width={18} />
-                        </div>
-                      </>
-                    ) : (
-                      <p>Connect</p>
-                    )}
-                  </Button>
-                </div>
-              </div>
-
-              <div className="flex flex-col gap-y-1">
-                <Label htmlFor="name">Connection Status</Label>
-                <div className="flex flex-row justify-left items-center space-x-2">
-                  <div className=" border rounded-lg  px-3 py-2 text-sm h-10 w-full ease-in-out duration-500 transition-all ">
-                    {currentConnection ? partnerId : "No connection"}
-                  </div>
-                  <>
-                    {terminateCall ? (
-                      <Button
-                        variant="destructive"
-                        type="button"
-                        // className="p-4 w-[160px] text-red-600 border-red-400 hover:bg-red-300 animate-in slide-in-from-right-[30px]"
-                        onClick={() => {
-                          peerRef.current.destroy();
-                        }}
-                      >
-                        Terminate
-                      </Button>
-                    ) : null}
-                  </>
-                </div>
-              </div>
-
-              {/* file upload */}
-              <div className="flex flex-col border rounded-lg  px-3 py-2 text-sm w-full ease-in-out duration-500 transition-all gap-y-2">
-                <div>
-                  <Label className=" font-semibold text-[16px]">Upload</Label>
-                </div>
-                <div>
-                  <FileUploadBtn
-                    inputRef={fileInputRef}
-                    uploadBtn={handleFileUploadBtn}
-                    handleFileChange={handleFileChange}
-                  />
-                </div>
-
-                {fileUpload ? (
-                  <FileUpload
-                    fileName={fileUpload[0]?.name}
-                    fileProgress={fileUploadProgress}
-                    handleClick={handleWebRTCUpload}
-                    showProgress={fileSending}
-                  />
-                ) : null}
-              </div>
-
-              {/* download file */}
-              {downloadFile ? (
-                <>
-                  <FileDownload
-                    fileName={fileNameState}
-                    fileReceivingStatus={fileReceiving}
-                    fileProgress={fileDownloadProgress}
-                    fileRawData={downloadFile}
-                  />
-                </>
-              ) : null}
-            </div>
-          </form>
-        </CardContent>
-        {acceptCaller ? (
-          <CardFooter className="flex justify-center">
-            <div>
+    <Card className="w-[350px]">
+      <CardHeader>
+        <h1 className="text-2xl font-bold">Share Files</h1>
+      </CardHeader>
+      <CardContent>
+        <div className="grid w-full items-center gap-4">
+          <div className="flex flex-col space-y-1.5">
+            <Label htmlFor="name">Your ID</Label>
+            <div className="flex">
+              <Input
+                id="name"
+                placeholder="Your ID"
+                value={userId || ""}
+                disabled
+              />
               <Button
+                onClick={() => CopyToClipboard(userId)}
                 variant="outline"
-                className=" bg-green-500 text-white hover:bg-green-400"
-                onClick={acceptUser}
+                size="icon"
+                className="ml-2"
               >
-                Click here to receive call from {signalingData.from}
+                {isCopied ? <Check /> : <CopyIcon />}
               </Button>
             </div>
-          </CardFooter>
-        ) : null}
-      </Card>
-    </>
+          </div>
+          <div className="flex flex-col space-y-1.5">
+            <Label htmlFor="framework">Partner&apos;s ID</Label>
+            <div className="flex">
+              <Input
+                disabled={currentConnection}
+                id="framework"
+                placeholder="Partner's ID"
+                value={partnerId}
+                onChange={(e) => setpartnerId(e.target.value)}
+              />
+            </div>
+          </div>
+        </div>
+      </CardContent>
+      <CardFooter className="flex flex-col gap-2">
+        {!currentConnection && !acceptCaller && (
+          <Button
+            disabled={isLoading}
+            onClick={handleConnectionMaking}
+            className="w-full"
+          >
+            {isLoading ? (
+              <div className="flex items-center gap-2">
+                <TailSpin
+                  height="20"
+                  width="20"
+                  color="white"
+                  ariaLabel="tail-spin-loading"
+                  radius="1"
+                  visible={true}
+                />
+                <p>Connecting...</p>
+              </div>
+            ) : (
+              "Connect"
+            )}
+          </Button>
+        )}
+        {acceptCaller && (
+          <Button onClick={acceptUser} className="w-full">
+            Accept Connection
+          </Button>
+        )}
+        {currentConnection && (
+          <>
+            <FileUploadBtn
+              handleFileChange={handleFileChange}
+              fileInputRef={fileInputRef}
+            />
+            <FileUpload
+              fileUpload={fileUpload}
+              handleWebRTCUpload={() =>
+                handleWebRTCUpload(userDetails.peerState)
+              }
+              fileSending={fileSending}
+              fileUploadProgress={fileUploadProgress}
+            />
+            <FileDownload
+              downloadFile={downloadFile}
+              fileReceiving={fileReceiving}
+              fileDownloadProgress={fileDownloadProgress}
+              name={name}
+            />
+            <ShareLink userId={userId} />
+          </>
+        )}
+      </CardFooter>
+    </Card>
   );
 };
 
