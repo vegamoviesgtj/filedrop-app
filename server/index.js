@@ -1,5 +1,5 @@
 const dotenv = require("dotenv");
-dotenv.config({ silent: process.env.NODE_ENV === 'production' });
+dotenv.config();
 const express = require("express");
 const http = require("http");
 const { Server } = require("socket.io");
@@ -8,10 +8,11 @@ const cors = require("cors");
 const app = express();
 const PORT = process.env.PORT || 8000;
 
-const allowedOrigins = ["http://localhost:3000", process.env.URL];
 app.use(
   cors({
-    origin: "*",
+    origin: process.env.NODE_ENV === 'production' 
+      ? [process.env.FRONTEND_URL]
+      : ["http://localhost:3000"],
     credentials: true,
   })
 );
@@ -19,12 +20,16 @@ app.use(
 const httpServer = http.createServer(app);
 
 app.get("/", (req, res) => {
-  res.send("hello from server");
+  res.json({ status: "Server is running" });
 });
 
 const io = new Server(httpServer, {
   cors: {
-    origin: "*",
+    origin: process.env.NODE_ENV === 'production' 
+      ? process.env.FRONTEND_URL
+      : "http://localhost:3000",
+    methods: ["GET", "POST"],
+    credentials: true
   },
 });
 
@@ -103,6 +108,6 @@ io.on("connection", (socket) => {
   });
 });
 
-httpServer.listen(PORT, () => {
+httpServer.listen(PORT, '0.0.0.0', () => {
   console.log(`Server is running on port ${PORT}`);
 });
