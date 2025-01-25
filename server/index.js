@@ -31,10 +31,13 @@ const io = new Server(httpServer, {
     origin: allowedOrigins,
     methods: ["GET", "POST"],
     credentials: true,
-    transports: ['websocket']
+    transports: ['websocket', 'polling']
   },
   pingTimeout: 60000,
-  pingInterval: 25000
+  pingInterval: 25000,
+  connectTimeout: 30000,
+  allowEIO3: true,
+  maxHttpBufferSize: 1e8 // 100 MB for larger file transfers
 });
 
 var records = new Map();
@@ -43,6 +46,12 @@ const uniqueIdTousers = new Map();
 
 io.on("connection", (socket) => {
   console.log("New client connected:", socket.id);
+  
+  // Send immediate acknowledgment
+  socket.emit("connection_ack", { 
+    status: "connected",
+    socketId: socket.id
+  });
   
   socket.on("joinRoom", (temp) => {
     socket.join(Number(temp));
@@ -56,14 +65,40 @@ io.on("connection", (socket) => {
   });
 
   socket.on("details", (data) => {
-    var user = data.socketId;
-    var uniqueId = data.uniqueId;
+    try {
+      var user = data.socketId;
+      var uniqueId = data.uniqueId;
 
-    usersToUniquedID.set(user, uniqueId);
-    uniqueIdTousers.set(uniqueId, user);
-    console.log("New User added:", user, "with ID:", uniqueId);
-    for (let [key, value] of usersToUniquedID) {
-      console.log(key + " = " + value);
+      console.log("Received details - Socket ID:", user, "Unique ID:", uniqueId);
+
+      if (!user || !uniqueId) {
+        console.error("Invalid details received:", data);
+        return;
+      }
+
+      usersToUniquedID.set(user, uniqueId);
+      uniqueIdTousers.set(uniqueId, user);
+      
+      // Send acknowledgment back to client
+      socket.emit("details_ack", {
+        status: "success",
+        socketId: user,
+        uniqueId: uniqueId
+      });
+
+      console.log("New User added:", user, "with ID:", uniqueId);
+      
+      // Log current connections
+      console.log("Current connections:");
+      for (let [key, value] of usersToUniquedID) {
+        console.log(key + " = " + value);
+      }
+    } catch (error) {
+      console.error("Error processing details:", error);
+      socket.emit("details_error", {
+        status: "error",
+        message: "Failed to process connection details"
+      });
     }
   });
 
@@ -97,18 +132,13 @@ io.on("connection", (socket) => {
       usersToUniquedID.delete(socket.id);
       uniqueIdTousers.delete(uniqueId);
       console.log("User removed:", socket.id);
-
-      console.log("Updated usersToUniquedID:");
-      for (let [key, value] of usersToUniquedID) {
-        console.log(key + " = " + value);
-      }
-
-      console.log("Updated uniqueIdTousers:");
-      for (let [key, value] of uniqueIdTousers) {
-        console.log(key + " = " + value);
-      }
     }
   });
+});
+
+// Handle server errors
+io.on("connect_error", (error) => {
+  console.error("Connection error:", error);
 });
 
 httpServer.listen(PORT, '0.0.0.0', () => {
