@@ -26,13 +26,33 @@ export const useSocket = () => {
 
 export const SocketProvider = ({ children }: { children: React.ReactNode }) => {
   const socket = useMemo(() => {
-    return io(String(process.env.NEXT_PUBLIC_SOCKET_SERVER_URL));
+    const socketUrl = process.env.NEXT_PUBLIC_SOCKET_SERVER_URL || 'http://localhost:8000';
+    return io(socketUrl, {
+      transports: ['websocket'],
+      withCredentials: true,
+      autoConnect: true,
+      reconnection: true,
+      reconnectionAttempts: 5
+    });
   }, []);
+
   const [peerState, setpeerState] = useState<any>();
-  const [SocketId, setSocketId] = useState<any>(socket);
-  const userId = useMemo(() => {
-    return nanoid(10);
-  }, []);
+  const [SocketId, setSocketId] = useState<any>();
+  
+  const userId = useMemo(() => nanoid(10), []);
+
+  // Set socket ID when connected
+  React.useEffect(() => {
+    socket.on('connect', () => {
+      console.log('Connected to server with ID:', socket.id);
+      setSocketId(socket.id);
+    });
+
+    return () => {
+      socket.off('connect');
+    };
+  }, [socket]);
+
   return (
     <SocketContext.Provider
       value={{ socket, userId, SocketId, setSocketId, peerState, setpeerState }}

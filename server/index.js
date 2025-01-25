@@ -8,12 +8,15 @@ const cors = require("cors");
 const app = express();
 const PORT = process.env.PORT || 8000;
 
+const allowedOrigins = process.env.NODE_ENV === 'production' 
+  ? [process.env.FRONTEND_URL]
+  : ["http://localhost:3000"];
+
 app.use(
   cors({
-    origin: process.env.NODE_ENV === 'production' 
-      ? [process.env.FRONTEND_URL]
-      : ["http://localhost:3000"],
+    origin: allowedOrigins,
     credentials: true,
+    methods: ["GET", "POST"],
   })
 );
 
@@ -25,12 +28,13 @@ app.get("/", (req, res) => {
 
 const io = new Server(httpServer, {
   cors: {
-    origin: process.env.NODE_ENV === 'production' 
-      ? process.env.FRONTEND_URL
-      : "http://localhost:3000",
+    origin: allowedOrigins,
     methods: ["GET", "POST"],
-    credentials: true
+    credentials: true,
+    transports: ['websocket']
   },
+  pingTimeout: 60000,
+  pingInterval: 25000
 });
 
 var records = new Map();
@@ -38,7 +42,8 @@ const usersToUniquedID = new Map();
 const uniqueIdTousers = new Map();
 
 io.on("connection", (socket) => {
-  // console.log(socket.id);
+  console.log("New client connected:", socket.id);
+  
   socket.on("joinRoom", (temp) => {
     socket.join(Number(temp));
     records.set(socket.id, Number(temp));
@@ -56,7 +61,7 @@ io.on("connection", (socket) => {
 
     usersToUniquedID.set(user, uniqueId);
     uniqueIdTousers.set(uniqueId, user);
-    console.log("New User added");
+    console.log("New User added:", user, "with ID:", uniqueId);
     for (let [key, value] of usersToUniquedID) {
       console.log(key + " = " + value);
     }
@@ -86,24 +91,22 @@ io.on("connection", (socket) => {
   });
 
   socket.on("disconnect", () => {
-    console.log(`Socket disconnected: ${socket.id}`);
+    console.log("Client disconnected:", socket.id);
+    const uniqueId = usersToUniquedID.get(socket.id);
+    if (uniqueId) {
+      usersToUniquedID.delete(socket.id);
+      uniqueIdTousers.delete(uniqueId);
+      console.log("User removed:", socket.id);
 
-    // Remove the disconnected socket ID from maps
-    const user = socket.id;
-    const uniqueId = usersToUniquedID.get(user);
+      console.log("Updated usersToUniquedID:");
+      for (let [key, value] of usersToUniquedID) {
+        console.log(key + " = " + value);
+      }
 
-    usersToUniquedID.delete(user);
-    uniqueIdTousers.delete(uniqueId);
-
-    // Log the updated maps
-    console.log("Updated usersToUniquedID:");
-    for (let [key, value] of usersToUniquedID) {
-      console.log(key + " = " + value);
-    }
-
-    console.log("Updated uniqueIdTousers:");
-    for (let [key, value] of uniqueIdTousers) {
-      console.log(key + " = " + value);
+      console.log("Updated uniqueIdTousers:");
+      for (let [key, value] of uniqueIdTousers) {
+        console.log(key + " = " + value);
+      }
     }
   });
 });
